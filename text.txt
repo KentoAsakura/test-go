@@ -1,0 +1,180 @@
+main.go
+package main
+
+import (
+	"net/http"
+	"log"
+	"html/template"
+	"io"
+
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"gorm.io/gorm"
+
+	"test-go/User"
+)
+
+var db *gorm.DB
+
+
+type TemplateRenderer struct {
+	templates *template.Template
+}
+
+func (t *TemplateRenderer) Render(w io.Writer, name string, data interface{}, c echo.Context) error {
+	err := t.templates.ExecuteTemplate(w, name, data)
+	if err != nil {
+		log.Printf("Error rendering template %s: %v", name, err)
+	}
+	return err
+}
+
+
+
+func main() {
+	e := echo.New()
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+	e.Renderer = &TemplateRenderer{
+		templates: template.Must(template.ParseGlob("templates/*.html")),
+	}
+
+	e.GET("/main",func(c echo.Context)error{
+		return c.Render(http.StatusOK,"index.html",nil)
+	})
+
+
+	// ログインフォームの表示用のルーティング
+	e.GET("/login", func(c echo.Context) error {
+		return c.Render(http.StatusOK, "login.html", nil)
+	})
+
+	e.Static("/css","css")
+	e.Static("/js","js")
+	e.Static("/images","images")
+
+	// ログイン用のルーティング
+	e.POST("/login", loginHandler)
+
+	// ユーザー登録のルーティング
+	e.POST("/register", registerHandler)
+
+	e.Start(":8080")
+}
+
+func loginHandler(c echo.Context) error {
+	username := c.FormValue("username")
+	phoneNumber := c.FormValue("phoneNumber")
+
+	var user User.User
+	if err := db.Where("username = ?", username).First(&user).Error; err != nil {
+		return c.Render(http.StatusUnauthorized, "login.html", map[string]interface{}{
+			"Error": "Invalid credentials",
+		})
+	}
+
+	// パスワードのハッシュ化はセキュリティ上の理由から必要です
+	// ここでは簡単な例として平文のパスワードをそのまま比較します
+	if user.PhoneNumber == phoneNumber {
+		return c.Render(http.StatusOK, "login_success.html", map[string]interface{}{
+			"Username": username,
+			"img":"/images/circleImg01.png",
+		})
+	}
+
+	return c.Render(http.StatusUnauthorized, "login.html", map[string]interface{}{
+		"Error": "Invalid credentials",
+	})
+}
+
+func registerHandler(c echo.Context) error {
+    username := c.FormValue("username")
+    password := c.FormValue("password")
+
+    if err := User.createUser(username, password); err != nil {
+        return c.String(http.StatusInternalServerError, "Failed to create user")
+    }
+
+    return c.String(http.StatusOK, "User registered successfully")
+}
+
+
+User.go
+
+package User
+
+import(
+	"image/png"
+	"os"
+	"github.com/boombuler/barcode"
+	"github.com/boombuler/barcode/qr"
+	"fmt"
+	"gorm.io/gorm"
+	"test-go/db"
+)
+
+type UserInfoMation struct{
+	QRCODE_Number string
+	Attend bool
+}
+
+
+type User struct{
+	gorm.Model
+	UserName string
+	PhoneNumber string
+	UserInfo UserInfoMation
+}
+
+func CreateQRCode(phoneNumber string)(string){
+	qrCode,_:=qr.Encode(phoneNumber,qr.M,qr.Auto)
+	qrCode,_=barcode.Scale(qrCode,200,200)
+	fileName:=fmt.Sprintf("QRCode/%s_qrcode.png",phoneNumber)
+	file,_:=os.Create(fileName)
+	defer file.Close()
+
+	png.Encode(file,qrCode)
+	return phoneNumber+"_qrcode.png"
+}
+
+func CreateUser(name string, phoneNumber string)(u User){
+	u.UserName=name
+	u.PhoneNumber=phoneNumber
+	var userInfo UserInfoMation
+	userInfo.QRCODE_Number=CreateQRCode(u.PhoneNumber)
+	u.UserInfo=userInfo
+	return u
+}
+
+func createUser(username, phoneNumber string) error {
+    // パスワードのハッシュ化はセキュリティ上の理由から必要です
+    // ここでは簡単な例として平文のパスワードをそのまま保存します
+    user := &User{UserName: username, PhoneNumber: phoneNumber}
+    
+    if err := db.db.Create(user).Error; err != nil {
+        return err
+    }
+
+    return nil
+}
+
+db.go
+package db
+
+import(
+	"gorm.io/gorm"
+	"gorm.io/driver/sqlite"
+	"test-go/User"
+)
+
+var db *gorm.DB
+
+func init() {
+	var err error
+	db, err = gorm.Open(sqlite.Open("test.db"), &gorm.Config{})
+	if err != nil {
+		panic("failed to connect database")
+	}
+	// データベースのマイグレーション
+	db.AutoMigrate(&User.User{})
+}
